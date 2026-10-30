@@ -1,4 +1,4 @@
-// language: Swift, file: ContainerBrowser.swift
+﻿// language: Swift, file: ContainerBrowser.swift
 // target: iOS 16+, arm64 | technique: FilzaSlop (sandbox token via MCM + MobileHouseArrest BundleID spoof)
 // requires: re-sign with com.apple.mobile.MobileHouseArrest bundle ID via eSign/Sideloadly
 
@@ -20,31 +20,6 @@ typealias container_object_free_f           = @convention(c) (UnsafeMutableRawPo
 typealias container_query_free_f            = @convention(c) (UnsafeMutableRawPointer?) -> Void
 typealias sandbox_extension_consume_f       = @convention(c) (UnsafePointer<CChar>?) -> Int64
 typealias container_copy_sb_token_f         = @convention(c) (UnsafeMutableRawPointer?) -> UnsafePointer<CChar>?
-
-private var p_cqc:   container_query_create_f? = nil
-private var p_cqsi:  container_query_set_identifiers_f? = nil
-private var p_cqis:  container_query_iterate_sync_f? = nil
-private var p_cogp:  container_object_get_path_f? = nil
-private var p_cosbx: container_object_sb_ext_act_f? = nil
-private var p_cof:   container_object_free_f? = nil
-private var p_cqf:   container_query_free_f? = nil
-
-final class ContainerQueryContext {
-    var resolvedPath: String?
-}
-
-// C-compatible callback with zero context capture to satisfy @convention(c)
-private let containerQueryCallback: @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void = { ctx, obj in
-    guard let ctx = ctx, let obj = obj else { return }
-    let context = Unmanaged<ContainerQueryContext>.fromOpaque(ctx).takeUnretainedValue()
-    if let cosbx = p_cosbx, let cogp = p_cogp, let cof = p_cof {
-        let rc = cosbx(obj)
-        if rc == 0, let cpath = cogp(obj) {
-            context.resolvedPath = String(cString: cpath)
-        }
-        cof(obj)
-    }
-}
 
 // MARK: - App Enumeration via LSApplicationWorkspace
 
@@ -76,31 +51,53 @@ func enumerateInstalledApps() -> [(bundleID: String, name: String, type: String)
 
 // MARK: - FilzaSlop Core: Sandbox Token Escape
 
+// C-compatible context struct — passed via the void* ctx parameter of cqis.
+// The literal callback captures nothing, satisfying Swift's C function pointer rules.
+private struct _MCMIterCtx {
+    var cogp:  container_object_get_path_f
+    var cosbx: container_object_sb_ext_act_f
+    var cof:   container_object_free_f
+    var pathBuf: UnsafeMutablePointer<CChar>?
+}
+
 func resolveContainerPath(for bundleID: String) -> String? {
     if mcmHandle == nil {
-        guard let handle = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_LAZY) else { return nil }
-        mcmHandle = handle
-        p_cqc   = dlsym(handle, "container_query_create").map({ unsafeBitCast($0, to: container_query_create_f.self) })
-        p_cqsi  = dlsym(handle, "container_query_set_identifiers").map({ unsafeBitCast($0, to: container_query_set_identifiers_f.self) })
-        p_cqis  = dlsym(handle, "container_query_iterate_results_sync").map({ unsafeBitCast($0, to: container_query_iterate_sync_f.self) })
-        p_cogp  = dlsym(handle, "container_object_get_path").map({ unsafeBitCast($0, to: container_object_get_path_f.self) })
-        p_cosbx = dlsym(handle, "container_object_sandbox_extension_activate").map({ unsafeBitCast($0, to: container_object_sb_ext_act_f.self) })
-        p_cof   = dlsym(handle, "container_object_free").map({ unsafeBitCast($0, to: container_object_free_f.self) })
-        p_cqf   = dlsym(handle, "container_query_free").map({ unsafeBitCast($0, to: container_query_free_f.self) })
+        mcmHandle = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_LAZY)
     }
+    guard let handle = mcmHandle else { return nil }
 
-    guard let cqc = p_cqc, let cqsi = p_cqsi, let cqis = p_cqis, let cqf = p_cqf else { return nil }
+    guard
+        let cqc   = dlsym(handle, "container_query_create").map({ unsafeBitCast($0, to: container_query_create_f.self) }),
+        let cqsi  = dlsym(handle, "container_query_set_identifiers").map({ unsafeBitCast($0, to: container_query_set_identifiers_f.self) }),
+        let cqis  = dlsym(handle, "container_query_iterate_results_sync").map({ unsafeBitCast($0, to: container_query_iterate_sync_f.self) }),
+        let cogp  = dlsym(handle, "container_object_get_path").map({ unsafeBitCast($0, to: container_object_get_path_f.self) }),
+        let cosbx = dlsym(handle, "container_object_sandbox_extension_activate").map({ unsafeBitCast($0, to: container_object_sb_ext_act_f.self) }),
+        let cof   = dlsym(handle, "container_object_free").map({ unsafeBitCast($0, to: container_object_free_f.self) }),
+        let cqf   = dlsym(handle, "container_query_free").map({ unsafeBitCast($0, to: container_query_free_f.self) })
+    else { return nil }
 
-    guard let query = cqc() else { return nil }
+    let query = cqc()
     defer { cqf(query) }
 
     bundleID.withCString { cqsi(query, $0) }
 
-    let context = ContainerQueryContext()
-    let ctxPtr = Unmanaged.passUnretained(context).toOpaque()
-    _ = cqis(query, containerQueryCallback, ctxPtr)
+    var ctx = _MCMIterCtx(cogp: cogp, cosbx: cosbx, cof: cof, pathBuf: nil)
+    withUnsafeMutablePointer(to: &ctx) { p in
+        _ = cqis(query, { rawCtx, obj in
+            guard let rawCtx, let obj else { return }
+            let c = rawCtx.assumingMemoryBound(to: _MCMIterCtx.self)
+            if c.pointee.cosbx(obj) == 0, let src = c.pointee.cogp(obj) {
+                let len = Int(strlen(src))
+                let buf = UnsafeMutablePointer<CChar>.allocate(capacity: len + 1)
+                buf.initialize(from: src, count: len + 1)
+                c.pointee.pathBuf = buf
+            }
+            c.pointee.cof(obj)
+        }, p)
+    }
 
-    return context.resolvedPath
+    defer { ctx.pathBuf?.deallocate() }
+    return ctx.pathBuf.map { String(cString: $0) }
 }
 
 // MARK: - File System Node
@@ -147,9 +144,9 @@ class BrowserViewModel: ObservableObject {
     var currentPath: String { pathStack.last ?? "/" }
 
     func loadApps() {
-        Task.detached(priority: .userInitiated) {
+        DispatchQueue.global(qos: .userInitiated).async {
             let apps = enumerateInstalledApps()
-            await MainActor.run {
+            DispatchQueue.main.async {
                 self.installedApps = apps.sorted { $0.name.lowercased() < $1.name.lowercased() }
                 self.statusMessage = "\(apps.count) apps found"
             }
@@ -157,19 +154,19 @@ class BrowserViewModel: ObservableObject {
     }
 
     func openContainer(bundleID: String, name: String) {
-        statusMessage      = "Resolving container for \(bundleID)…"
+        statusMessage      = "Resolving container for \(bundleID)..."
         selectedBundleID   = bundleID
-        Task.detached(priority: .userInitiated) {
+        DispatchQueue.global(qos: .userInitiated).async {
             if let path = resolveContainerPath(for: bundleID) {
                 let nodes = listDirectory(path)
-                await MainActor.run {
+                DispatchQueue.main.async {
                     self.pathStack    = [path]
                     self.currentNodes = nodes
-                    self.statusMessage = "\(name) → \(path)"
+                    self.statusMessage = "\(name) -> \(path)"
                 }
             } else {
-                await MainActor.run {
-                    self.statusMessage = "⚠️ Container access denied for \(bundleID)"
+                DispatchQueue.main.async {
+                    self.statusMessage = "Container access denied for \(bundleID)"
                 }
             }
         }
@@ -240,7 +237,7 @@ struct AppListView: View {
             .navigationTitle("Installed Apps")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .bottomBar) {
+                ToolbarItem(placement: .status) {
                     Text(vm.statusMessage).font(.caption).foregroundColor(.secondary)
                 }
             }
@@ -256,46 +253,62 @@ struct FileBrowserView: View {
 
     var body: some View {
         NavigationView {
-            List(vm.currentNodes) { node in
-                Button {
-                    if node.isDirectory {
-                        vm.navigateInto(node)
-                    } else {
-                        selectedFile = node
-                        fileContent  = vm.readFile(node)
-                        showingFile  = true
-                    }
-                } label: {
+            VStack(spacing: 0) {
+                ScrollView(.horizontal, showsIndicators: false) {
                     HStack {
-                        Image(systemName: node.isDirectory ? "folder.fill" : "doc")
-                            .foregroundColor(node.isDirectory ? .yellow : .secondary)
-                        VStack(alignment: .leading) {
-                            Text(node.name)
-                                .font(.body)
-                                .foregroundColor(.primary)
-                            if let sz = node.size, !node.isDirectory {
-                                Text("\(sz) bytes")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                        ForEach(Array(vm.pathStack.enumerated()), id: \.offset) { i, seg in
+                            Text((seg as NSString).lastPathComponent.isEmpty
+                                 ? "/"
+                                 : (seg as NSString).lastPathComponent)
+                                .font(.caption)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(i == vm.pathStack.count - 1
+                                            ? Color.blue.opacity(0.2) : Color.clear)
+                                .cornerRadius(4)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+                .frame(height: 30)
+                .background(Color(.systemGroupedBackground))
+
+                List(vm.currentNodes) { node in
+                    Button {
+                        if node.isDirectory {
+                            vm.navigateInto(node)
+                        } else {
+                            selectedFile = node
+                            fileContent  = vm.readFile(node)
+                            showingFile  = true
+                        }
+                    } label: {
+                        HStack {
+                            Image(systemName: node.isDirectory ? "folder.fill" : "doc.text")
+                                .foregroundColor(node.isDirectory ? .yellow : .gray)
+                            VStack(alignment: .leading) {
+                                Text(node.name).font(.body)
+                                if let sz = node.size, !node.isDirectory {
+                                    Text(ByteCountFormatter.string(fromByteCount: sz, countStyle: .file))
+                                        .font(.caption).foregroundColor(.secondary)
+                                }
+                            }
+                            Spacer()
+                            if node.isDirectory {
+                                Image(systemName: "chevron.right")
+                                    .font(.caption).foregroundColor(.secondary)
                             }
                         }
-                        Spacer()
-                        if node.isDirectory {
-                            Image(systemName: "chevron.right")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
                     }
-                    .padding(.vertical, 2)
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
             .navigationTitle("File Browser")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     if vm.pathStack.count > 1 {
-                        Button("↑ Up") { vm.navigateUp() }
+                        Button("Up") { vm.navigateUp() }
                     }
                 }
             }
