@@ -1,44 +1,47 @@
-﻿name: Build FilzaBrowse IPA
+name: Build FilzaBrowse IPA
 
 on:
   workflow_dispatch:
   push:
     branches: [ main, master ]
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
-
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: List targets
+      - name: List project targets
         run: xcodebuild -project FilzaBrowse.xcodeproj -list
 
-      - name: Build (unsigned)
+      - name: Build unsigned app
         run: |
+          set -e
           xcodebuild \
             -project FilzaBrowse.xcodeproj \
             -target FilzaBrowse \
             -configuration Release \
             -sdk iphoneos \
-            ONLY_ACTIVE_ARCH=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            OBJROOT=${{ github.workspace }}/build \
-            SYMROOT=${{ github.workspace }}/build \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            VALIDATE_PRODUCT=NO \
+            OBJROOT="${{ github.workspace }}/build" \
+            SYMROOT="${{ github.workspace }}/build" \
             build
 
       - name: Package IPA
         run: |
+          set -e
           APP_PATH="${{ github.workspace }}/build/Release-iphoneos/FilzaBrowse.app"
           IPA_DIR="${{ github.workspace }}/build/ipa"
 
@@ -46,14 +49,25 @@ jobs:
           cp -r "$APP_PATH" "$IPA_DIR/Payload/"
 
           cd "$IPA_DIR"
-          zip -qr "${{ github.workspace }}/build/FilzaBrowse_unsigned.ipa" Payload/
+          zip -qr "${{ github.workspace }}/FilzaBrowse_unsigned.ipa" Payload/
 
-          echo "=== IPA built ==="
-          ls -lh "${{ github.workspace }}/build/FilzaBrowse_unsigned.ipa"
+          echo "=== IPA built successfully ==="
+          ls -lh "${{ github.workspace }}/FilzaBrowse_unsigned.ipa"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: FilzaBrowse_unsigned_ipa
-          path: build/FilzaBrowse_unsigned.ipa
-          retention-days: 7
+          path: FilzaBrowse_unsigned.ipa
+          retention-days: 14
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: FilzaBrowse Release v1.0.${{ github.run_number }}
+          files: FilzaBrowse_unsigned.ipa
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
