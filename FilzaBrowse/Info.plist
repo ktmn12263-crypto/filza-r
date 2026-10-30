@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- CRITICAL: This bundle ID spoof is the FilzaSlop trust vector -->
+    <key>CFBundleIdentifier</key>
+    <string>com.apple.mobile.MobileHouseArrest</string>
+
+    <key>CFBundleExecutable</key>
+    <string>FilzaBrowse</string>
+    <key>CFBundleDisplayName</key>
+    <string>FilzaBrowse</string>
+    <key>CFBundleName</key>
+    <string>FilzaBrowse</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>MinimumOSVersion</key>
+    <string>16.0</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array><string>arm64</string></array>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Container browsing</string>
+</dict>
+</plist>
